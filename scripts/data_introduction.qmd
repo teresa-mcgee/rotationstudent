@@ -1,0 +1,226 @@
+---
+title: "QTLscan"
+format: html
+editor: visual
+execute: 
+  cache: true
+---
+
+# Analysis with Proteomic data
+
+You likely won't need to run any scans yourself, but I want to be sure that you have access to any data you need. This is a qtl scan with both simulated data and some protein data (Bsep).
+
+```{r import}
+setwd("/Users/teresamcgee/Documents/UNC/Valdar/rotation-diploffect")
+source("scripts/libraries.R")
+source("scripts/helperfunctions.R")
+genomecache <- "~/Documents/UNC/Valdar/rotation-diploffect/data/genomecache_happy"
+prot_scan<- readRDS("output/Bsep_qtlscan.rds")
+prot_data<- read_csv("data/BsepData.csv",
+                     col_types = cols(...1 = col_skip()))
+ch16_bsep36<- read_csv("data/Bsep_36stateprob_ch16.csv")
+```
+
+## QTL Scan from miQTL
+
+```{r}
+# Weights here need to be filled because of a bug in miqtl that
+# I haven't fixed yet. 
+
+# Here weights are just the number of replicates. If you don't
+# have replicates and don't have a specific weight, just have
+# a named list of repeated 1's. 
+
+weights<- prot_data$NUM.OBS
+names(weights)<- prot_data$SUBJECT.NAME
+
+# if you dont want to run this line you can just import the scan
+# Bsep_scan <- readRDS("output/Bsep_qtlscan.rds")
+Bsep_scan <- scan.h2lmm(genomecache = genomecache,
+                         data = prot_data, 
+                         formula = rint(FC)~1, 
+                         use.multi.impute = FALSE, 
+                         weights = weights,
+                         print.locus.fit = FALSE,
+                         return.allele.effects = TRUE)
+
+qtl_locus <- grab.locus.from.scan(Bsep_scan)
+
+
+```
+
+The significance threshold takes a long time to run so I am excluding it. To run it, remove the execute direction from the threshold chunk.
+
+```{r catch_threshold}
+permute_thres<- 5.02
+```
+
+```{r threshold}
+#| execute: false
+#| echo: false
+
+permuted_pheno<- miqtl::generate.sample.outcomes.matrix(Bsep_scan,
+                                                        num.samples = 200,
+                                                        method = "permutation")
+permute_scans<- run.threshold.scans(permuted_pheno,
+                                    genomecache = genomecache,
+                                    data = prot_data, 
+                                    use.multi.impute = FALSE,
+                                    use.progress.bar = FALSE)
+permute_thres<- get.gev.thresholds(permute_scans)
+
+```
+
+```{r Scan_fig}
+genome.plotter.whole(scan.list=list(Bsep_scan), 
+                     main = "Bsep QTL Scan",
+                     mark.locus = qtl_locus,
+                     distinguish.chr.type = "box",
+                     hard.thresholds = permute_thres)
+```
+
+## Haplotype State
+
+This is a very simple projection of the data. Only considers the amount of phenotype and the probabilities from the genome cache.
+
+```{r}
+prob.heatmap(marker = qtl_locus, 
+             p.value = min(Bsep_scan$p.value), 
+             genomecache = genomecache, 
+             model = "additive", 
+             phenotype = "NOISE", 
+             phenotype.data = prot_data)
+
+```
+
+## 36 state diplotype data of collaborative cross 
+
+The genome cache used in miqtl is a 8 state haplotype state, since it is the collaborative cross and we assume that the lines are isogenic.
+
+These states are derived from Hidden Markov Model simulation and gives a probability of inheriting the haplotype pair (i.e. B6/B6, B6/AJ, B6/NOD.... WSB/WSB).
+
+The CC diplotype state can be accessed from Lenoard McMillan's systems bio site. These are not formatting in the correct way, though, since they are grouped by strain. I have an R script to pull a loci of interest... there is a more effective way to do it in Bash, I just haven't gotten around to it since I don't do a lot of this.
+
+If you're running your own loci, you will need my code to run this. You should be able to just start with the Bsep Ch 16 peak loci data that I have provided.
+
+```{r getting_36}
+#| execute: false
+
+loci<- grab.locus.from.scan(Bsep_scan, chr = "all")
+heatmap(as.matrix(ch16_bsep36[,5:ncol(ch16_bsep36)]),)
+
+```
+
+#### TIMBR
+
+TIMBR, in its entirety, uses the chinese restaurant process and haplotype relatedness from phylogenetic trees to infer the allele effect on the phenotype. When the population is inbred/ isogenic this works well. This however, is less adept at handling heterozygotes.
+
+**I am not including any of the CRP or phylogenetic tree here, just inference based on diplotype states.**
+
+```{r}
+#importing the data from TIMBR so that the formating is correct
+data("mcv.data")
+
+# this line of code uses the helper funciton, which is pretty
+# slow. I have included the dataset already 
+#P<- getDiploProb(qtl_locus = "UNC1659488", 
+#                 directory = "~/genotypeProb")
+
+P <-as.data.frame(ch16_bsep36[,-1])
+rownames(P)<- ch16_bsep36$...1
+
+
+# the dataset I provided includes all strains. The bsep data doesn't
+# use all strains 
+
+P <- P[rownames(P)%in%prot_data$SUBJECT.NAME,]
+
+# this step is overabundance of caution to be sure that the 
+# probalitites and the strains in prot_data are in the same order
+if(isTRUE(rownames(P) != prot_data$SUBJECT.NAME)){
+  stop()
+}
+P<- 
+#TIMBR
+prior.M<- mcv.data$prior.M
+prior.D<- mcv.data$prior.D
+prior.D$P<- P
+prior.D$fixed.diplo<-FALSE
+prior.M.hap <- mcv.data$prior.M$fixed
+results.TIMBR<- TIMBR::TIMBR(y = prot_data$FC, 
+                             prior.D = prior.D, 
+                             prior.M = prior.M.hap)
+TIMBR::TIMBR.plot.circos(results.TIMBR)
+
+# from the circos plot we suspect that there are
+# 2-3 allelic groups
+
+TIMBR.plot.haplotypes(results.TIMBR)
+
+
+# we can thus update our prior from one allelic group per 
+# strain c("0,1,2,3,4,5,6,7")
+# to groups of alleles
+prior.M.bi<- prior.M.hap
+prior.M.tri<- prior.M.hap
+
+
+prior.M.bi$M.IDs <- c("0,1,0,1,1,0,0,1")
+results.TIMBR.bi<- TIMBR::TIMBR(y = prot_data$FC, 
+                                prior.D = prior.D, 
+                                prior.M = prior.M.bi)
+TIMBR.plot.haplotypes(results.TIMBR.bi, 
+                      TIMBR.output.bkgrd = results.TIMBR,
+                      hap.labels = getFounderList())
+
+results.TIMBR.bi<- TIMBR::TIMBR(y = prot_data$FC, 
+                                prior.D = prior.D, 
+                                prior.M = prior.M.bi)
+TIMBR.plot.haplotypes(results.TIMBR.bi, 
+                      TIMBR.output.bkgrd = results.TIMBR,
+                      hap.labels = getFounderList())
+
+# tri allelic state
+prior.M.tri$M.IDs <- c("0,1,2,1,1,0,2,0")
+results.TIMBR.tri<- TIMBR::TIMBR(y = prot_data$FC, 
+                                prior.D = prior.D, 
+                                prior.M = prior.M.tri)
+TIMBR.plot.haplotypes(results.TIMBR.tri, 
+                      TIMBR.output.bkgrd = results.TIMBR,
+                      hap.labels = getFounderList())
+```
+
+# Analysis with sample Diploffect/ simulated data
+
+Diploffect comes with sample data which should be helpful. This is not the CC strain though, so there are more predicted heterozygotes
+
+```{r}
+
+data <- Diploffect.INLA::exampleCC
+data36 <- Diploffect.INLA::locusmatrix
+heatmap(data36,cexCol = .5)
+
+```
+
+## Simulated data
+
+you can also simulate the data.
+
+```{r}
+
+#devtools::install_github("gkeele/sparcc")
+
+library(sparcc)
+
+## Download the sparc genome cache from GitHub
+download.file(url = "https://github.com/gkeele/sparcc_cache/archive/master.zip", 
+              destfile = "data/sparcc_cache.zip")
+unzip(zipfile = "data/sparcc_cache.zip")
+genomecache <- "data/sparcc_cache"
+
+phenotypes <- sim.CC.data(genomecache = genomecache, 
+                          num.lines = 40, 
+                          num.sim = 10, 
+                          num.replicates = 2, 
+                          qtl.effect.size = 0.8)
+```
